@@ -1,0 +1,19 @@
+[package]
+name = "mach-listener"
+version = "0.1.0-alpha.1"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+
+[target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
+dispatch2 = { version = "0.3", default-features = false, features = ["alloc"] }
+futures-util = { version = "0.3", default-features = false }
+
+[target.'cfg(any(target_os = "ios", target_os = "macos"))'.dev-dependencies]
+tokio = { version = "1", features = ["process", "rt", "sync", "macros"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+
+# This needs to run without the harness because it needs to spawn a subprocess of itself.
+[[test]]
+name = "mp_send_recv_reply"
+harness = false

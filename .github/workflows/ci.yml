@@ -1,0 +1,58 @@
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+
+name: CI
+permissions:
+  contents: read
+
+jobs:
+  clippy:
+    name: Clippy ${{ matrix.rust }}
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        rust:
+          - stable
+          # MSRV
+          - 1.85.0
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: clippy
+      - run: cargo clippy -- -D clippy::dbg_macro -D warnings -F unused_must_use
+
+  test:
+    name: Test macOS ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - macos-13
+          - macos-14
+          - macos-15
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+  
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
