@@ -31,7 +31,7 @@ const DEFAULT_MAX_MSG_SEND_SIZE_BYTES: u32 = 1_000_000;
 const LENGTH_PREFIX_SIZE: usize = size_of::<usize>();
 
 /// Failure cases that come from interacting with either a [Client] or [Server].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     /// An unrecoverable error that occured when interacting with a Mach port.
     ///
@@ -52,6 +52,8 @@ pub enum Error {
     MessageTooLarge,
     /// A message failed to be sent by a [Client] in the requested amount of time.
     FailedToSend,
+    /// A client failed to receive the expected response message from the server it requested.
+    NoReply,
 }
 
 impl std::fmt::Display for Error {
@@ -67,6 +69,9 @@ impl std::fmt::Display for Error {
             Error::CorruptMessage => f.write_str("received unknown or corrupt message"),
             Error::MessageTooLarge => f.write_str("message was too large to handle"),
             Error::FailedToSend => f.write_str("failed to send message in expected timeframe"),
+            Error::NoReply => f.write_str(
+                "failed to receive reply from server; the server ignored the request or timed out",
+            ),
         }
     }
 }
@@ -177,7 +182,11 @@ impl Client {
                 timeout: self.send_timeout,
             },
         )?;
-        read_mach_message(&reply_port, DEFAULT_MAX_MSG_SEND_SIZE_BYTES, false)
+        read_mach_message(
+            &reply_port,
+            DEFAULT_MAX_MSG_SEND_SIZE_BYTES,
+            RecvMode::ClientReply,
+        )
     }
 }
 
@@ -278,7 +287,7 @@ impl Server {
             // with the source's read-ready signal.
             let mut message_batch = VecDeque::new();
             loop {
-                match read_mach_message(&port, context.max_msg_size_bytes, true) {
+                match read_mach_message(&port, context.max_msg_size_bytes, RecvMode::Server) {
                     Err(Error::OsError(e)) if e.code() == ffi::MACH_RCV_TIMED_OUT => {
                         break;
                     }
@@ -755,10 +764,15 @@ fn send_mach_message(
     }
 }
 
+enum RecvMode {
+    Server,
+    ClientReply,
+}
+
 fn read_mach_message<Side>(
     port: &ffi::MachPort,
     max_msg_size: u32,
-    non_blocking: bool,
+    recv_mode: RecvMode,
 ) -> Result<NewMessage<Side>, Error> {
     let mut current_size = 1024;
 
@@ -792,7 +806,7 @@ fn read_mach_message<Side>(
             | ffi::MACH_RCV_TRAILER_TYPE(ffi::MACH_MSG_TRAILER_FORMAT_0 as i32)
             | ffi::MACH_RCV_TRAILER_ELEMENTS(ffi::MACH_RCV_TRAILER_AV as i32);
 
-        if non_blocking {
+        if matches!(recv_mode, RecvMode::Server) {
             recv_options |= ffi::MACH_RCV_TIMEOUT;
         }
 
@@ -837,6 +851,28 @@ fn read_mach_message<Side>(
                 let header = unsafe { message_buffer.read_header() };
 
                 let msg_id = header.msgh_id;
+
+                // Per the Mach specification "Each send-once right generated guarantees the receipt of a single message, either a
+                // message sent to that send-once right or, if the send-once right is in any way destroyed, a send-once notification"
+                //
+                // If the server ignores and deallocates a client's reply port, which could be a send-once right, the kernel
+                // steps in and ensures we are given an instance of `mach_send_once_notification_t` so we don't block forever
+                // waiting on a now-impossible event.
+                //
+                // Specifically check if there was no inline data to prevent a conflict of `msg_id` being defined the same
+                // as `MACH_NOTIFY_SEND_ONCE` by an end user. We already checked there were no descriptors, so this means
+                // it was a proper kernel notification or a completely empty message which is basically the same as far as
+                // this is concerned. We _could_ check the trailer format to see it is != what we requested but its not clear
+                // this would make a difference.
+                #[expect(clippy::as_conversions)]
+                if matches!(recv_mode, RecvMode::ClientReply)
+                    && msg_id == ffi::MACH_NOTIFY_SEND_ONCE
+                    && header.msgh_size == ffi::HEADER_SIZE as u32
+                    && current_size >= ffi::FORMAT_0_SIZE
+                {
+                    return Err(Error::NoReply);
+                }
+
                 let reply_port = if header.msgh_remote_port != ffi::MACH_PORT_NULL {
                     Some(ffi::MachPort {
                         inner: header.msgh_remote_port,
