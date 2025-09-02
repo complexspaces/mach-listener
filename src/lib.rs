@@ -185,7 +185,9 @@ impl Client {
         read_mach_message(
             &reply_port,
             DEFAULT_MAX_MSG_SEND_SIZE_BYTES,
-            RecvMode::ClientReply,
+            RecvMode::ClientReply {
+                timeout: self.recv_timeout,
+            },
         )
     }
 }
@@ -766,7 +768,7 @@ fn send_mach_message(
 
 enum RecvMode {
     Server,
-    ClientReply,
+    ClientReply { timeout: Option<Duration> },
 }
 
 fn read_mach_message<Side>(
@@ -806,6 +808,31 @@ fn read_mach_message<Side>(
             | ffi::MACH_RCV_TRAILER_TYPE(ffi::MACH_MSG_TRAILER_FORMAT_0 as i32)
             | ffi::MACH_RCV_TRAILER_ELEMENTS(ffi::MACH_RCV_TRAILER_AV as i32);
 
+        let timeout = match recv_mode {
+            RecvMode::Server => {
+                // As we received a signal this was readable, we expect something to be present
+                // and only use the timeout error as a signal the internal queue has finished
+                // being drained out.
+                recv_options |= ffi::MACH_RCV_TIMEOUT;
+                0
+            }
+            RecvMode::ClientReply { timeout } => {
+                // The system doesn't support massive durations so just truncate ones that are too high.
+                #[expect(clippy::as_conversions)]
+                if let Some(timeout) = timeout.map(|dur| dur.as_millis() as u32) {
+                    // Only set the timeout flag if we had a non-zero duration, otherwise it will
+                    // be in "non-blocking" mode which is incorrect for the blocking client API.
+                    if timeout > 0 {
+                        recv_options |= ffi::MACH_RCV_TIMEOUT;
+                    }
+                    timeout
+                } else {
+                    // Otherwise, default to blocking forever waiting for the reply.
+                    0
+                }
+            }
+        };
+
         if matches!(recv_mode, RecvMode::Server) {
             recv_options |= ffi::MACH_RCV_TIMEOUT;
         }
@@ -819,7 +846,7 @@ fn read_mach_message<Side>(
                 0,
                 current_size,
                 port.inner,
-                0, // As we received a signal this was readable, we expect something to be present
+                timeout,
                 ffi::MACH_PORT_NULL,
             )
         };
@@ -865,7 +892,7 @@ fn read_mach_message<Side>(
                 // this is concerned. We _could_ check the trailer format to see it is != what we requested but its not clear
                 // this would make a difference.
                 #[expect(clippy::as_conversions)]
-                if matches!(recv_mode, RecvMode::ClientReply)
+                if matches!(recv_mode, RecvMode::ClientReply { .. })
                     && msg_id == ffi::MACH_NOTIFY_SEND_ONCE
                     && header.msgh_size == ffi::HEADER_SIZE as u32
                     && current_size >= ffi::FORMAT_0_SIZE
