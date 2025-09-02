@@ -102,6 +102,20 @@ pub struct mach_msg_trailer_t {
 
 #[repr(C)]
 #[derive(Copy, Clone)]
+pub struct mach_msg_security_trailer_t {
+    pub msgh_trailer_type: mach_msg_trailer_type_t,
+    pub msgh_trailer_size: mach_msg_trailer_size_t,
+    pub msgh_seqno: mach_port_seqno_t,
+    pub msgh_sender: security_token_t,
+}
+
+pub type mach_msg_format_0_trailer_t = mach_msg_security_trailer_t;
+// The size is known at compile-time to fit within `u32`.
+#[expect(clippy::as_conversions)]
+pub const FORMAT_0_SIZE: u32 = size_of::<mach_msg_format_0_trailer_t>() as u32;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
 pub struct mach_msg_audit_trailer_t {
     pub msgh_trailer_type: mach_msg_trailer_type_t,
     pub msgh_trailer_size: mach_msg_trailer_size_t,
@@ -132,6 +146,11 @@ pub const MAX_TRAILER_SIZE: u32 = size_of::<mach_msg_max_trailer_t>() as u32;
 pub const AUDIT_TRAILER_SIZE: u32 = size_of::<mach_msg_audit_trailer_t>() as u32;
 pub const HEADER_SIZE: usize = size_of::<mach_msg_header_t>();
 
+// mach/notify.h
+const MACH_NOTIFY_FIRST: c_int = 0o100;
+// Receive right has no extant send rights */
+pub const MACH_NOTIFY_SEND_ONCE: c_int = MACH_NOTIFY_FIRST + 0o7;
+
 pub type MachPortReleaser = unsafe extern "C" fn(ipc_space_t, mach_port_t) -> KernReturn;
 
 pub struct MachPort {
@@ -147,7 +166,7 @@ impl Drop for MachPort {
 }
 
 /// A failure that occured during a mach port operation.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 #[repr(transparent)]
 pub struct KernError(NonZeroI32);
 
